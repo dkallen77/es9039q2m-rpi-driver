@@ -1,0 +1,10 @@
+# Ignore build directory and kernel build artifacts
+build/
+*.o
+*.ko
+*.mod.c
+*.order
+*.symvers
+*.cmd
+modules.order
+Module.symvers 

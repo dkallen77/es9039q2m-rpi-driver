@@ -8,6 +8,59 @@
 #define ES9039Q2M_CH2_VOLUME_REG     0x4B
 #define ES9039Q2M_VOLUME_HOLD_REG    0x59
 #define ES9039Q2M_FILTER_SHAPE_REG   0x58
+#define ES9039Q2M_NUM_FILTER_SHAPES 8
+
+static const char * const es9039q2m_filter_shape_texts[] = {
+    "Minimum Phase",
+    "Linear Phase Fast Roll Off Apodizing",
+    "Linear Phase Fast Roll Off",
+    "Linear Phase Fast Roll Off Low Ripple",
+    "Linear Phase Slow Roll Off",
+    "Minimum Phase Fast Roll Off",
+    "Minimum Phase Slow Roll Off",
+    "Minimum Phase Slow Roll Off Low Dispersion"
+};
+
+static const struct soc_enum es9039q2m_filter_shape_enum =
+    SOC_ENUM_SINGLE(0, 0, ES9039Q2M_NUM_FILTER_SHAPES, es9039q2m_filter_shape_texts);
+
+static int es9039q2m_get_filter_shape(struct snd_kcontrol *kcontrol,
+                                      struct snd_ctl_elem_value *ucontrol) {
+    struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+    struct i2c_client *client = to_i2c_client(component->dev);
+    int val = i2c_smbus_read_byte_data(client, ES9039Q2M_FILTER_SHAPE_REG);
+    if (val < 0) {
+        dev_err(&client->dev, "Failed to read filter shape: %d\n", val);
+        return val;
+    }
+    ucontrol->value.enumerated.item[0] = val & 0x07;
+    const char *filter_shape_name = "Unknown";
+    if ((val & 0x07) < ES9039Q2M_NUM_FILTER_SHAPES) {
+        filter_shape_name = es9039q2m_filter_shape_texts[val & 0x07];
+    }
+    dev_info(&client->dev, "Read filter shape: 0x%02x (name: %s)\n", val, filter_shape_name);
+    return 0;
+}
+
+static int es9039q2m_set_filter_shape_enum(struct snd_kcontrol *kcontrol,
+                                           struct snd_ctl_elem_value *ucontrol) {
+    struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+    struct i2c_client *client = to_i2c_client(component->dev);
+    unsigned int val = ucontrol->value.enumerated.item[0];
+    const char *filter_shape_name = "Unknown";
+    if (val < ES9039Q2M_NUM_FILTER_SHAPES) {
+        filter_shape_name = es9039q2m_filter_shape_texts[val];
+    }
+    val = val | 0x60;
+    int ret;
+    dev_info(&client->dev, "Setting filter shape to %u (name: %s)\n", val, filter_shape_name);
+    ret = i2c_smbus_write_byte_data(client, ES9039Q2M_FILTER_SHAPE_REG, val);
+    if (ret < 0) {
+        dev_err(&client->dev, "Failed to set filter shape: %d\n", ret);
+        return ret;
+    }
+    return 0;
+}
 
 // Set volume: value is 0-255 representing 0dB to -127.5dB in 0.5dB steps
 static int es9039q2m_set_vol(struct snd_kcontrol *kcontrol,
@@ -119,6 +172,8 @@ static void es9039q2m_component_remove(struct snd_soc_component *component) {
 static const struct snd_kcontrol_new es9039q2m_controls[] = {
     SOC_SINGLE_EXT("DAC Volume", 0, 0, 255, 0,
                    es9039q2m_get_vol, es9039q2m_set_vol),
+    SOC_ENUM_EXT("Filter Shape", es9039q2m_filter_shape_enum,
+                 es9039q2m_get_filter_shape, es9039q2m_set_filter_shape_enum),
 };
 
 static const struct snd_soc_component_driver soc_codec_dev_es9039q2m = {
