@@ -34,7 +34,5 @@
             codec = <&es9039q2m>;
             status = "okay";
         };
-    };  
-
-
+    };
 };
