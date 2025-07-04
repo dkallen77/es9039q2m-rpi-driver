@@ -1,6 +1,7 @@
 #include <linux/module.h>
 #include <linux/i2c.h>
 #include <sound/soc.h>
+#include <sound/tlv.h>
 
 #define ES9039Q2M_MODE_REG           0x00
 #define ES9039Q2M_SOFT_RAMP_REG      0x82
@@ -8,7 +9,7 @@
 #define ES9039Q2M_CH2_VOLUME_REG     0x4B
 #define ES9039Q2M_VOLUME_HOLD_REG    0x59
 #define ES9039Q2M_FILTER_SHAPE_REG   0x58
-#define ES9039Q2M_NUM_FILTER_SHAPES 8
+#define ES9039Q2M_NUM_FILTER_SHAPES  8
 
 static const char * const es9039q2m_filter_shape_texts[] = {
     "Minimum Phase",
@@ -24,6 +25,8 @@ static const char * const es9039q2m_filter_shape_texts[] = {
 static const struct soc_enum es9039q2m_filter_shape_enum =
     SOC_ENUM_SINGLE(0, 0, ES9039Q2M_NUM_FILTER_SHAPES, es9039q2m_filter_shape_texts);
 
+static const DECLARE_TLV_DB_SCALE(es9039q2m_db_scale, -12750, 50, 0);
+
 static int es9039q2m_get_filter_shape(struct snd_kcontrol *kcontrol,
                                       struct snd_ctl_elem_value *ucontrol) {
     struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
@@ -38,7 +41,7 @@ static int es9039q2m_get_filter_shape(struct snd_kcontrol *kcontrol,
     if ((val & 0x07) < ES9039Q2M_NUM_FILTER_SHAPES) {
         filter_shape_name = es9039q2m_filter_shape_texts[val & 0x07];
     }
-    dev_info(&client->dev, "Read filter shape: 0x%02x (name: %s)\n", val, filter_shape_name);
+    dev_dbg(&client->dev, "Read filter shape: 0x%02x (name: %s)\n", val, filter_shape_name);
     return 0;
 }
 
@@ -68,11 +71,13 @@ static int es9039q2m_set_vol(struct snd_kcontrol *kcontrol,
     struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
     struct i2c_client *client = to_i2c_client(component->dev);
     unsigned int val = ucontrol->value.integer.value[0];
-    unsigned int inv_val = 255 - val; // Invert ALSA value for DAC
+    val = 255 - val; // Invert the value: 0 becomes 255, 255 becomes 0
+    int db_centi = -50 * val; // -0.5 dB per step, in hundredths
     int ret;
 
-    dev_info(&client->dev, "Setting volume to %u (inverted: %u)\n", val, inv_val);
+    dev_info(&client->dev, "Setting volume to %u (dB: %d.%02d)\n", val, db_centi / 100, abs(db_centi % 100));
 
+    usleep_range(10000, 11000); // 10ms delay before volume hold
     ret = i2c_smbus_write_byte_data(client, ES9039Q2M_VOLUME_HOLD_REG, 0x14); // Hold volume
     if (ret < 0) {
         dev_err(&client->dev, "Failed to hold volume: %d\n", ret);
@@ -80,19 +85,19 @@ static int es9039q2m_set_vol(struct snd_kcontrol *kcontrol,
     }
     dev_info(&client->dev, "Volume hold set to 0x14\n");
 
-    ret = i2c_smbus_write_byte_data(client, ES9039Q2M_CH1_VOLUME_REG, inv_val); // Set Ch1 volume
+    ret = i2c_smbus_write_byte_data(client, ES9039Q2M_CH1_VOLUME_REG, val); // Set Ch1 volume
     if (ret < 0) {
         dev_err(&client->dev, "Failed to set Ch1 volume: %d\n", ret);
         return ret;
     }
-    dev_info(&client->dev, "Ch1 volume set to 0x%02x\n", inv_val);
+    dev_info(&client->dev, "Ch1 volume set to 0x%02x\n", val);
 
-    ret = i2c_smbus_write_byte_data(client, ES9039Q2M_CH2_VOLUME_REG, inv_val); // Set Ch2 volume
+    ret = i2c_smbus_write_byte_data(client, ES9039Q2M_CH2_VOLUME_REG, val); // Set Ch2 volume
     if (ret < 0) {
         dev_err(&client->dev, "Failed to set Ch2 volume: %d\n", ret);
         return ret;
     }
-    dev_info(&client->dev, "Ch2 volume set to 0x%02x\n", inv_val);
+    dev_info(&client->dev, "Ch2 volume set to 0x%02x\n", val);
 
     ret = i2c_smbus_write_byte_data(client, ES9039Q2M_VOLUME_HOLD_REG, 0x04); // Release volume hold
     if (ret < 0) {
@@ -100,6 +105,8 @@ static int es9039q2m_set_vol(struct snd_kcontrol *kcontrol,
         return ret;
     }
     dev_info(&client->dev, "Volume hold released to 0x04\n");
+    
+    usleep_range(10000, 11000); // 10ms delay after volume hold release
 
     return 0;
 }
@@ -115,8 +122,9 @@ static int es9039q2m_get_vol(struct snd_kcontrol *kcontrol,
         return val;
     }
 
-    dev_info(&client->dev, "Read volume: 0x%02x (inverted: %u)\n", val, 255 - val);
-    ucontrol->value.integer.value[0] = 255 - val; // Invert for ALSA
+    int db_centi = -50 * val; // -0.5 dB per step, in hundredths
+    dev_info(&client->dev, "Read volume: 0x%02x (dB: %d.%02d)\n", val, db_centi / 100, abs(db_centi % 100));
+    ucontrol->value.integer.value[0] = 255 - val; // Invert the value back for the UI
     return 0;
 }
 
@@ -139,6 +147,20 @@ static int es9039q2m_enable_output(struct snd_soc_component *component) {
         return ret;
     }
     dev_info(&client->dev, "DAC enabled (mode set to 0x02)\n");
+
+    // Set default volume (50% = 128)
+    unsigned int default_vol = 128;
+    ret = i2c_smbus_write_byte_data(client, ES9039Q2M_CH1_VOLUME_REG, default_vol);
+    if (ret < 0) {
+        dev_err(&client->dev, "Failed to set default Ch1 volume: %d\n", ret);
+        return ret;
+    }
+    ret = i2c_smbus_write_byte_data(client, ES9039Q2M_CH2_VOLUME_REG, default_vol);
+    if (ret < 0) {
+        dev_err(&client->dev, "Failed to set default Ch2 volume: %d\n", ret);
+        return ret;
+    }
+    dev_info(&client->dev, "Default volume set to 50%% (0x%02x)\n", default_vol);
 
     return 0;
 }
@@ -170,8 +192,8 @@ static void es9039q2m_component_remove(struct snd_soc_component *component) {
 }
 
 static const struct snd_kcontrol_new es9039q2m_controls[] = {
-    SOC_SINGLE_EXT("DAC Volume", 0, 0, 255, 0,
-                   es9039q2m_get_vol, es9039q2m_set_vol),
+    SOC_SINGLE_EXT_TLV("DAC Volume", 0, 0, 255, 0,
+                   es9039q2m_get_vol, es9039q2m_set_vol, es9039q2m_db_scale),
     SOC_ENUM_EXT("Filter Shape", es9039q2m_filter_shape_enum,
                  es9039q2m_get_filter_shape, es9039q2m_set_filter_shape_enum),
 };
